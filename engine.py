@@ -18,7 +18,7 @@ from typing import Iterable
 from pathlib import Path
 
 import torch
-
+import wandb
 import numpy as np
 
 from timm.utils import accuracy
@@ -58,7 +58,8 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
 
         # here is the trick to mask out classes of non-current tasks
         if args.train_mask and class_mask is not None:
-            mask = class_mask[task_id]
+            #mask = class_mask[task_id]
+            mask = np.array(class_mask[:task_id+1]).flatten().tolist()
             not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
             not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
             logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
@@ -240,9 +241,9 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader, device=device, 
                                     task_id=task_id, class_mask=class_mask, acc_matrix=acc_matrix, args=args)
         if args.output_dir and utils.is_main_process():
-            Path(os.path.join(args.output_dir, 'checkpoint')).mkdir(parents=True, exist_ok=True)
+            Path(os.path.join(args.output_dir, f'checkpoint_{args.name}')).mkdir(parents=True, exist_ok=True)
             
-            checkpoint_path = os.path.join(args.output_dir, 'checkpoint/task{}_checkpoint.pth'.format(task_id+1))
+            checkpoint_path = os.path.join(args.output_dir, f'checkpoint_{args.name}/task{task_id+1}_checkpoint.pth')
             state_dict = {
                     'model': model_without_ddp.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -257,6 +258,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
             **{f'test_{k}': v for k, v in test_stats.items()},
             'epoch': epoch,}
+        wandb.log(log_stats)
 
         if args.output_dir and utils.is_main_process():
             with open(os.path.join(args.output_dir, '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))), 'a') as f:

@@ -18,13 +18,14 @@ import glob
 from shutil import move, rmtree
 
 import numpy as np
-
+import datasets as hfdatasets
 import torch
 from torchvision import datasets
 from torchvision.datasets.utils import download_url, check_integrity, verify_str_arg, download_and_extract_archive
 
 import PIL
-from PIL import Image
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from .dataset_utils import read_image_file, read_label_file
 
@@ -416,6 +417,106 @@ class StanfordCars(datasets.StanfordCars):
             return False
 
         return self._annotations_mat_path.exists() and self._images_base_path.is_dir()
+    
+
+
+class Cars(torch.utils.data.Dataset):
+    def __init__(self,root, split="train", transform=None, target_transform=None, download=False):
+        if split == "train":
+            self.hfdata = hfdatasets.load_dataset("Multimodal-Fatima/StanfordCars_train",cache_dir=root)['train']
+        else:
+            self.hfdata = hfdatasets.load_dataset("Multimodal-Fatima/StanfordCars_test",cache_dir=root)['test']
+        self.transform = transform
+        self.classes = self.hfdata.features['label'].names
+        self.targets = self.hfdata['label']
+        
+    def __len__(self):
+        return len(self.hfdata)
+    def __getitem__(self, idx):
+        img = self.hfdata[idx]['image']
+        target = self.hfdata[idx]['label']
+        if self.transform is not None:
+            img = self.transform(img)
+        return img,target
+
+from torchvision.datasets import FGVCAircraft
+class Aircraft(torch.utils.data.Dataset):
+    def __init__(self,root, split="train", transform=None, target_transform=None, download=True):
+        if split == "train":
+            self.dataset = FGVCAircraft(root, split='trainval',transform=transform, download=True)
+        else:
+            self.dataset = FGVCAircraft(root, split='test',transform=transform, download=True)
+        self.transform = transform
+        self.targets = [self.dataset[i][1] for i in range(len(self.dataset))]
+        
+    def __len__(self):
+        return len(self.dataset)
+    def __getitem__(self, idx):
+        img = self.dataset[idx][0]
+        target = self.dataset[idx][1]
+        
+        return img,target
+
+
+from torchvision.datasets import Country211 as Country
+
+
+class Country211(torch.utils.data.Dataset):
+    def __init__(self, root, split="train", transform=None, target_transform=None, download=True):
+        if split == "train":
+            self.dataset = Country(root, split='train',transform=transform, download=download)
+        else:
+            self.dataset = Country(root, split='test',transform=transform, download=download)
+    def __len__(self):
+        return len(self.dataset)
+    def __getitem__(self, idx):
+        img = self.dataset[idx][0]
+        target = self.dataset[idx][1]
+        
+        return img,target
+
+from torchvision.datasets import GTSRB as GTS
+class GTSRB(torch.utils.data.Dataset):
+    def __init__(self, root, split="train", transform=None, target_transform=None, download=True):
+        if split == "train":
+            self.dataset = GTS(root, split='train',transform=transform, download=download)
+        else:
+            self.dataset = GTS(root, split='test',transform=transform, download=download)
+        self.targets = [self.dataset._samples[i][1] for i in range(len(self.dataset))]
+    def __len__(self):
+        return len(self.dataset)
+    def __getitem__(self, idx):
+        img = self.dataset[idx][0]
+        target = self.dataset[idx][1]
+        
+        return img,target
+
+from torchvision.datasets import ImageFolder
+class Birdsnap(torch.utils.data.Dataset):
+    def __init__(self,root="/home/paulj/data/birdsnap/all-ims",split="train",transform=None,target_transform=None,download=False):
+        self.root = root
+        self.set = ImageFolder("/home/paulj/data/birdsnap",transform=transform)
+        self.idx_dir = "/home/paulj/data/birdsnap/"
+        with open(f'{self.idx_dir}/test_images.txt','r') as f:
+            lines = f.readlines()
+            test_paths = [os.path.join(self.root,line.strip()) for line in lines if 'jpg' in line]
+        test_indices = [idx for idx, ( path,_) in enumerate(self.set.samples) if path in test_paths]
+        train_indices = [idx for idx in range(len(self.set)) if idx not in test_indices]
+        if split == "train":
+            self.set = torch.utils.data.Subset(self.set,train_indices)
+        else:
+            self.set = torch.utils.data.Subset(self.set,test_indices)
+        self.targets = [self.set[i][1] for i in range(len(self.set))]
+        self.transform = transform
+    def __len__(self):
+        return len(self.set)
+    def __getitem__(self, idx):
+        img = self.set[idx][0]
+        target = self.set[idx][1]
+        if self.transform is not None:
+            img = self.transform(img)
+        return img,target
+
 
 class CUB200(torch.utils.data.Dataset):
     def __init__(self, root, train=True, transform=None, target_transform=None, download=False):        
@@ -488,6 +589,22 @@ class CUB200(torch.utils.data.Dataset):
                         dst = test_folder + '/' + image_path
                     
                     move(src, dst)
+
+class CUB(torch.utils.data.Dataset):
+    def __init__(self,root, train=True, transform=None, target_transform=None, download=False):
+        self.data = hfdatasets.load_dataset("alkzar90/CC6204-Hackaton-Cub-Dataset",cache_dir=root,split='train')
+        self.transform = transform
+        self.classes = self.data.features['label'].names
+        self.targets = self.data['label']
+        
+    def __len__(self):
+        return len(self.data)
+    def __getitem__(self, idx):
+        img = self.data[idx]['image']
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.data[idx]['label']
+
 
 class TinyImagenet(torch.utils.data.Dataset):
     def __init__(self, root, train=True, transform=None, target_transform=None, download=False):        

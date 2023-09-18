@@ -7,6 +7,7 @@
 # -- Jaeho Lee, dlwogh9344@khu.ac.kr
 # ------------------------------------------
 
+from itertools import chain
 import random
 
 import torch
@@ -43,6 +44,31 @@ def build_continual_dataloader(args):
         args.nb_classes = len(dataset_val.classes)
 
         splited_dataset, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == "cub":
+        dataset_train, dataset_val = get_dataset('CUB200', transform_train, transform_val, args)
+        args.nb_classes = len(dataset_val.classes)
+        splited_datasets, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == "aircraft":
+        dataset_train, dataset_val = get_dataset('aircraft', transform_train, transform_val, args)
+        args.nb_classes = 100
+        args.num_tasks = 10        
+        splited_datasets, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == "cars":
+        dataset_train, dataset_val = get_dataset('cars', transform_train, transform_val, args)
+        args.nb_classes = 190
+        args.num_tasks = 10
+        splited_datasets, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == "country":
+        dataset_train , dataset_val = get_dataset('country', transform_train, transform_val, args)
+        splited_datasets, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == "gtsrb":
+        dataset_train , dataset_val = get_dataset('gtsrb', transform_train, transform_val, args)
+        args.nb_classes = 40
+        splited_datasets, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == "birdsnap":
+        dataset_train, dataset_val = get_dataset('birdsnap', transform_train, transform_val, args)
+        # args.nb_classes = len(dataset_val.classes)
+        splited_datasets, class_mask = split_single_dataset(dataset_train, dataset_val, args)
     else:
         if args.dataset == '5-datasets':
             dataset_list = ['SVHN', 'MNIST', 'CIFAR10', 'NotMNIST', 'FashionMNIST']
@@ -58,7 +84,8 @@ def build_continual_dataloader(args):
     for i in range(args.num_tasks):
         if args.dataset.startswith('Split-'):
             dataset_train, dataset_val = splited_dataset[i]
-
+        elif args.dataset == "cub" or args.dataset == "cars" or args.dataset == "aircraft" or args.dataset == "country" or args.dataset == "gtsrb" or args.dataset == "birdsnap":
+            dataset_train, dataset_val = splited_datasets[i]
         else:
             dataset_train, dataset_val = get_dataset(dataset_list[i], transform_train, transform_val, args)
 
@@ -83,12 +110,24 @@ def build_continual_dataloader(args):
         else:
             sampler_train = torch.utils.data.RandomSampler(dataset_train)
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            
+        def collate_fn(examples):
+            images = []
+            labels = []
+            for example in examples:
+                if example[0].shape[0] == 3:
+                    images.append(example[0])
+                    labels.append(example[1])
+            pixel_values = torch.stack(images)
+            labels = torch.tensor(labels)
+            return pixel_values, labels
         
         data_loader_train = torch.utils.data.DataLoader(
             dataset_train, sampler=sampler_train,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
+            collate_fn=collate_fn,
         )
 
         data_loader_val = torch.utils.data.DataLoader(
@@ -96,6 +135,7 @@ def build_continual_dataloader(args):
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
+            collate_fn=collate_fn,
         )
 
         dataloader.append({'train': data_loader_train, 'val': data_loader_val})
@@ -130,7 +170,25 @@ def get_dataset(dataset, transform_train, transform_val, args,):
     elif dataset == 'Flower102':
         dataset_train = Flowers102(args.data_path, split='train', download=True, transform=transform_train)
         dataset_val = Flowers102(args.data_path, split='test', download=True, transform=transform_val)
-    
+    elif dataset == 'cars':
+        dataset_train = Cars(args.data_path, split='train', download=True, transform=transform_train)
+        dataset_val = Cars(args.data_path, split='test', download=True, transform=transform_val)
+    elif dataset == 'aircraft':
+        dataset_train = Aircraft(args.data_path, split='train', download=True, transform=transform_train)
+        dataset_val = Aircraft(args.data_path, split='test', download=True, transform=transform_val)
+    elif dataset == "country":
+        dataset_train = Country(args.data_path, split='train', download=True, transform=transform_train)
+        dataset_val = Country(args.data_path, split='test', download=True, transform=transform_val)
+    elif dataset == "gtsrb":
+        dataset_train = GTSRB(args.data_path, split='train', download=True, transform=transform_train)
+        dataset_val = GTSRB(args.data_path, split='test', download=True, transform=transform_val)
+        
+    elif dataset == 'CUB200':
+        dataset_train = CUB(args.data_path, train=True, download=True, transform=transform_train)
+        dataset_val = CUB(args.data_path, train=False, download=True, transform=transform_val)
+    elif dataset == "birdsnap":
+        dataset_train = Birdsnap(args.data_path, split="train", download=True, transform=transform_train)
+        dataset_val = Birdsnap(args.data_path, split="test", download=True, transform=transform_val)
     elif dataset == 'Cars196':
         dataset_train = StanfordCars(args.data_path, split='train', download=True, transform=transform_train)
         dataset_val = StanfordCars(args.data_path, split='test', download=True, transform=transform_val)
@@ -157,7 +215,7 @@ def get_dataset(dataset, transform_train, transform_val, args,):
     return dataset_train, dataset_val
 
 def split_single_dataset(dataset_train, dataset_val, args):
-    nb_classes = len(dataset_val.classes)
+    nb_classes = args.nb_classes
     assert nb_classes % args.num_tasks == 0
     classes_per_task = nb_classes // args.num_tasks
 
@@ -168,8 +226,11 @@ def split_single_dataset(dataset_train, dataset_val, args):
 
     if args.shuffle:
         random.shuffle(labels)
+    
+    buffer = [[] for _ in range(args.nb_classes)]
 
-    for _ in range(args.num_tasks):
+    for t in range(args.num_tasks):
+        buffer_flat = list(chain.from_iterable(buffer))  
         train_split_indices = []
         test_split_indices = []
         
@@ -179,13 +240,22 @@ def split_single_dataset(dataset_train, dataset_val, args):
         mask.append(scope)
 
         for k in range(len(dataset_train.targets)):
-            if int(dataset_train.targets[k]) in scope:
+            if int(dataset_train.targets[k]) in scope or k in buffer_flat:
                 train_split_indices.append(k)
                 
         for h in range(len(dataset_val.targets)):
             if int(dataset_val.targets[h]) in scope:
                 test_split_indices.append(h)
         
+        buffer_per_class = args.memory // (classes_per_task* (t+1))
+
+        for i in range(len(buffer)):
+            buffer[i] = buffer[i][:buffer_per_class]
+            print(f"buffer[{i}] : {len(buffer[i])}")
+        for k in range(len(dataset_train.targets)):
+            if int(dataset_train.targets[k]) in scope and len(buffer[int(dataset_train.targets[k])]) < buffer_per_class:
+                buffer[int(dataset_train.targets[k])].append(k)        
+
         subset_train, subset_val =  Subset(dataset_train, train_split_indices), Subset(dataset_val, test_split_indices)
 
         split_datasets.append([subset_train, subset_val])

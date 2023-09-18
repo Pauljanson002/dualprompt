@@ -21,11 +21,11 @@ from timm.models import create_model
 from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 
-from datasets import build_continual_dataloader
+from cldatasets import build_continual_dataloader
 from engine import *
 import models
 import utils
-
+import wandb
 import warnings
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
 
@@ -41,6 +41,9 @@ def main(args):
     random.seed(seed)
 
     cudnn.benchmark = True
+    
+    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="disabled")
+    args.name = f"dualprompt_{args.dataset}"
 
     data_loader, class_mask = build_continual_dataloader(args)
 
@@ -158,15 +161,68 @@ if __name__ == '__main__':
     if config == 'cifar100_dualprompt':
         from configs.cifar100_dualprompt import get_args_parser
         config_parser = subparser.add_parser('cifar100_dualprompt', help='Split-CIFAR100 DualPrompt configs')
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 2000
+        args.nb_classes = 100
+    elif config == "cub_dualprompt":
+        from configs.cub_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('cub_dualprompt', help='CUB-200-2011 dualprompt configs')
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 240
+        args.nb_classes = 200
+    elif config == "cars_dualprompt":
+        from configs.cars_dualprompt import get_args_parser
+        config_parser = subparser.add_parser("cars_dualprompt", help="Stanford Cars dualprompt configs")
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 240
+        args.nb_classes = 190
+    elif config == "aircraft_dualprompt":
+        from configs.aircraft_dualprompt import get_args_parser
+        config_parser = subparser.add_parser("aircraft_dualprompt", help="FGVC-Aircraft dualprompt configs")
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 250
+        args.nb_classes = 100
+    elif config == "country_dualprompt":
+        from configs.country_dualprompt import get_args_parser
+        config_parser = subparser.add_parser("country_dualprompt", help="Country dualprompt configs")
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 1000
+        args.nb_classes = 200
+    elif config == "gtsrb_dualprompt":
+        from configs.gtsrb_dualprompt import get_args_parser
+        config_parser = subparser.add_parser("gtsrb_dualprompt", help="GTSRB dualprompt configs")
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 1000
+        args.nb_classes = 40
+    elif config == "birdsnap_dualprompt":
+        from configs.birdsnap_dualprompt import get_args_parser
+        config_parser = subparser.add_parser("birdsnap_dualprompt", help="Birdsnap dualprompt configs")
+        get_args_parser(config_parser)
+        args = parser.parse_args()
+        args.num_tasks = 10
+        args.memory = 1500
+        args.nb_classes = 500
     elif config == 'imr_dualprompt':
         from configs.imr_dualprompt import get_args_parser
         config_parser = subparser.add_parser('imr_dualprompt', help='Split-ImageNet-R DualPrompt configs')
     else:
         raise NotImplementedError
         
-    get_args_parser(config_parser)
+    # get_args_parser(config_parser)
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
     
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
