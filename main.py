@@ -42,7 +42,7 @@ def main(args):
 
     cudnn.benchmark = True
     
-    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="disabled")
+    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="offline")
     args.name = f"dualprompt_{args.dataset}"
 
     data_loader, class_mask = build_continual_dataloader(args)

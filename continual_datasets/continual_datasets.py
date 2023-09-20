@@ -493,9 +493,9 @@ class GTSRB(torch.utils.data.Dataset):
 
 from torchvision.datasets import ImageFolder
 class Birdsnap(torch.utils.data.Dataset):
-    def __init__(self,root="/home/paulj/data/birdsnap/all-ims",split="train",transform=None,target_transform=None,download=False):
+    def __init__(self,root="/home/paulj/data/birdsnap/download/images",split="train",transform=None,target_transform=None,download=False):
         self.root = root
-        self.set = ImageFolder("/home/paulj/data/birdsnap",transform=transform)
+        self.set = ImageFolder("/home/paulj/data/birdsnap/download/images")
         self.idx_dir = "/home/paulj/data/birdsnap/"
         with open(f'{self.idx_dir}/test_images.txt','r') as f:
             lines = f.readlines()
