@@ -1,0 +1,6 @@
+Dualprompt --> Prompt length = [10,20] , Pool size = [10,20]
+Learning rate = [0.03, 0.003 , 0.005]
+epochs = [5, 10]
+
+Imagenet backbone first then clip backbone
+

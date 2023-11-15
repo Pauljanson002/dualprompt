@@ -20,55 +20,48 @@ set -e
 #         --data-path /local_datasets/ \
 #         --output_dir ./output 
 
-python main.py \
-aircraft_dualprompt \
---model vit_base_patch16_224 \
---batch-size 32 \
---data-path ~/data/ \
---output_dir ./output 
 
 
-
-python main.py \
-cars_dualprompt \
---model vit_base_patch16_224 \
---batch-size 32 \
---data-path ~/data/ \
---output_dir ./output 
+# python main.py \
+# cars_dualprompt \
+# --model vit_base_patch16_clip_224 \
+# --batch-size 32 \
+# --data-path ~/data/ \
+# --output_dir ./output 
 
 python main.py \
 cifar100_dualprompt \
---model vit_base_patch16_224 \
+--model vit_base_patch16_clip_224 \
 --batch-size 32 \
 --data-path ~/data/ \
 --output_dir ./output 
 
-python main.py \
-aircraft_dualprompt \
---model vit_base_patch16_224 \
---batch-size 32 \
---data-path ~/data/ \
---output_dir ./output 
+# python main.py \
+# aircraft_dualprompt \
+# --model vit_base_patch16_clip_224 \
+# --batch-size 32 \
+# --data-path ~/data/ \
+# --output_dir ./output 
 
 
-python main.py \
-cub_dualprompt \
---model vit_base_patch16_224 \
---batch-size 32 \
---data-path ~/data/ \
---output_dir ./output \
+# python main.py \
+# cub_dualprompt \
+# --model vit_base_patch16_clip_224 \
+# --batch-size 32 \
+# --data-path ~/data/ \
+# --output_dir ./output \
 
 
-python main.py \
-gtsrb_dualprompt \
---model vit_base_patch16_224 \
---batch-size 32 \
---data-path ~/data/ \
---output_dir ./output \
+# python main.py \
+# gtsrb_dualprompt \
+# --model vit_base_patch16_clip_224 \
+# --batch-size 32 \
+# --data-path ~/data/ \
+# --output_dir ./output \
 
-python main.py \
-birdsnap_dualprompt \
---model vit_base_patch16_224 \
---batch-size 32 \
---data-path ~/data/ \
---output_dir ./output 
+# python main.py \
+# birdsnap_dualprompt \
+# --model vit_base_patch16_clip_224 \
+# --batch-size 16 \
+# --data-path ~/data/ \
+# --output_dir ./output 

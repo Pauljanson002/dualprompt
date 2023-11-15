@@ -14,14 +14,14 @@ import numpy as np
 import time
 import torch
 import torch.backends.cudnn as cudnn
-
+import clip
 from pathlib import Path
 
 from timm.models import create_model
 from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 
-from cldatasets import build_continual_dataloader
+from cldatasets import build_continual_dataloader,get_classnames
 from engine import *
 import models
 import utils
@@ -42,10 +42,10 @@ def main(args):
 
     cudnn.benchmark = True
     
-    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="offline")
+    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="disabled")
     args.name = f"dualprompt_{args.dataset}"
 
-    data_loader, class_mask = build_continual_dataloader(args)
+    data_loader, class_mask ,main_buffer,dataset_train = build_continual_dataloader(args)
 
     print(f"Creating original model: {args.model}")
     original_model = create_model(
@@ -87,7 +87,6 @@ def main(args):
     )
     original_model.to(device)
     model.to(device)  
-
     if args.freeze:
         # all parameters are frozen for original vit model
         for p in original_model.parameters():
@@ -97,7 +96,27 @@ def main(args):
         for n, p in model.named_parameters():
             if n.startswith(tuple(args.freeze)):
                 p.requires_grad = False
-    
+                
+    model.classnames = get_classnames(args)
+    text_encodings = clip.tokenize(model.classnames).to(device)
+    clip_model, _ = clip.load("ViT-B/16", device="cuda")
+    for param in clip_model.parameters():
+        param.requires_grad = False
+    original_model.proj = clip_model.visual.proj.float()
+    original_model.text_features = clip_model.encode_text(text_encodings).float()
+    original_model.logit_scale = clip_model.logit_scale.exp().float()
+    model.proj = clip_model.visual.proj.float()
+    model.proj.requires_grad = True
+    model.text_features = clip_model.encode_text(text_encodings).float()
+    model.logit_scale = clip_model.logit_scale.exp().float()
+
+    number_of_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    ratio = number_of_trainable_params / total_params
+    print(f"Number of trainable parameters: {number_of_trainable_params}")
+    print(f"Total number of parameters: {total_params}")
+    print(f"Ratio: {ratio}")
+    args.main_buffer = main_buffer
     print(args)
 
     if args.eval:
@@ -132,6 +151,10 @@ def main(args):
     args.lr = args.lr * global_batch_size / 256.0
 
     optimizer = create_optimizer(args, model_without_ddp)
+    optimizer.add_param_group({
+        "params": [model.proj],
+        "lr": args.lr * 1e-2,
+    })
 
     if args.sched != 'constant':
         lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -145,7 +168,7 @@ def main(args):
 
     train_and_evaluate(model, model_without_ddp, original_model,
                     criterion, data_loader, optimizer, lr_scheduler,
-                    device, class_mask, args)
+                    device, class_mask, args,dataset_train)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -153,7 +176,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DualPrompt training and evaluation configs')
-    
+    parser.add_argument("--buffer_size", type=int, default=2000, help="buffer size for each task")
     config = parser.parse_known_args()[-1][0]
 
     subparser = parser.add_subparsers(dest='subparser_name')
@@ -164,7 +187,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 2000
+        if args.buffer_size == 2000:
+            args.memory = 2000
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 100
     elif config == "cub_dualprompt":
         from configs.cub_dualprompt import get_args_parser
@@ -172,7 +198,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 240
+        if args.buffer_size == 2000:
+            args.memory = 240
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 200
     elif config == "cars_dualprompt":
         from configs.cars_dualprompt import get_args_parser
@@ -180,7 +209,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 240
+        if args.buffer_size == 2000:
+            args.memory = 240
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 190
     elif config == "aircraft_dualprompt":
         from configs.aircraft_dualprompt import get_args_parser
@@ -188,7 +220,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 250
+        if args.buffer_size == 2000:
+            args.memory = 250
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 100
     elif config == "country_dualprompt":
         from configs.country_dualprompt import get_args_parser
@@ -196,7 +231,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 1000
+        if args.buffer_size == 2000:
+            args.memory = 1000
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 200
     elif config == "gtsrb_dualprompt":
         from configs.gtsrb_dualprompt import get_args_parser
@@ -204,7 +242,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 1000
+        if args.buffer_size == 2000:
+            args.memory = 1000
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 40
     elif config == "birdsnap_dualprompt":
         from configs.birdsnap_dualprompt import get_args_parser
@@ -212,7 +253,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 1500
+        if args.buffer_size == 2000:
+            args.memory = 1500
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 500
     elif config == 'imr_dualprompt':
         from configs.imr_dualprompt import get_args_parser

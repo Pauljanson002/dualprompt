@@ -1,0 +1,5 @@
+# rsync ./output/checkpoint_dualprompt_birdsnap/task10_checkpoint.pth janson2@beluga.computecanada.ca:/scratch/janson2/output/checkpoints/dualprompt_birdsnap/ --progress
+#rsync ./output/checkpoint_dualprompt_aircraft/task10_checkpoint.pth janson2@beluga.computecanada.ca:/scratch/janson2/output/checkpoints/dualprompt_aircraft/ --progress
+#rsync ./output/checkpoint_dualprompt_cars/task10_checkpoint.pth janson2@beluga.computecanada.ca:/scratch/janson2/output/checkpoints/dualprompt_cars/ --progress; echo "Done with cars"
+rsync ./output/checkpoint_dualprompt_cub/task10_checkpoint.pth janson2@beluga.computecanada.ca:/scratch/janson2/output/checkpoints/dualprompt_cub/ --progress; echo "Done with cub"
+# rsync ./output/checkpoint_dualprompt_gtsrb/task10_checkpoint.pth janson2@beluga.computecanada.ca:/scratch/janson2/output/checkpoints/dualprompt_gtsrb/ --progress; echo "Done with gtsrb"

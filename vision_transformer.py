@@ -40,6 +40,10 @@ from timm.models.helpers import build_model_with_cfg, resolve_pretrained_cfg, na
 from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
 from timm.models.registry import register_model
 
+
+OPENAI_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+OPENAI_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
 from prompt import EPrompt
 from attention import PreT_Attention
 
@@ -92,6 +96,9 @@ default_cfgs = {
     #         'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_224.npz'),
     'vit_base_patch16_224': _cfg(
         url='https://storage.googleapis.com/vit_models/imagenet21k/ViT-B_16.npz'),
+    'vit_base_patch16_clip_224': _cfg(
+        hf_hub_id='timm/vit_base_patch16_clip_224.laion2b_ft_in12k_in1k',
+        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD, crop_pct=0.95),
     'vit_base_patch16_384': _cfg(
         url='https://storage.googleapis.com/vit_models/augreg/'
             'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_384.npz',
@@ -602,9 +609,42 @@ class VisionTransformer(nn.Module):
         
         return res
 
+
+    def forward_lang(self, res, pre_logits: bool = False):
+        x = res['x']
+        if self.class_token and self.head_type == 'token':
+            x = x[:, 0]
+        elif self.head_type == 'gap' and self.global_pool == 'avg':
+            x = x.mean(dim=1)
+        elif self.head_type == 'prompt' and self.prompt_pool:
+            x = x[:, 1:(1 + self.total_prompt_len)] if self.class_token else x[:, 0:self.total_prompt_len]
+            x = x.mean(dim=1)
+        elif self.head_type == 'token+prompt' and self.prompt_pool and self.class_token:
+            x = x[:, 0:self.total_prompt_len + 1]
+            x = x.mean(dim=1)
+        else:
+            raise ValueError(f'Invalid classifier={self.classifier}')
+        
+        res['pre_logits'] = x
+
+        x = x @ self.proj
+        x = x / x.norm(dim=1, keepdim=True)
+        text_features = self.text_features / self.text_features.norm(dim=1, keepdim=True)
+        logits_per_image = self.logit_scale * x @ text_features.t()
+        logits_per_text = logits_per_image.t()
+        res['logits'] = logits_per_image
+        res["logits_per_text"] = logits_per_text
+        
+        # text_features_unselected = self.text_features/self.text_features.norm(dim=1, keepdim=True)
+        # logits_per_image_unselected = self.logit_scale * x @ text_features_unselected.t()
+        # res['logits_unselected'] = logits_per_image_unselected
+        
+        return res
+
     def forward(self, x, task_id=-1, cls_features=None, train=False):
         res = self.forward_features(x, task_id=task_id, cls_features=cls_features, train=train)
-        res = self.forward_head(res)
+        # res = self.forward_head(res)
+        res = self.forward_lang(res)
         return res
 
 
@@ -744,49 +784,134 @@ def _load_weights(model: VisionTransformer, checkpoint_path: str, prefix: str = 
         block.norm2.weight.copy_(_n2p(w[f'{block_prefix}LayerNorm_2/scale']))
         block.norm2.bias.copy_(_n2p(w[f'{block_prefix}LayerNorm_2/bias']))
 
+def _convert_openai_clip(state_dict, model, prefix='visual.'):
+    out_dict = {}
+    swaps = [
+        ('conv1', 'patch_embed.proj'), ('positional_embedding', 'pos_embed'),
+        ('transformer.resblocks.', 'blocks.'), ('ln_pre', 'norm_pre'), ('ln_post', 'norm'), ('ln_', 'norm'),
+        ('in_proj_', 'qkv.'), ('out_proj', 'proj'), ('mlp.c_fc', 'mlp.fc1'), ('mlp.c_proj', 'mlp.fc2'),
+    ]
+    for k, v in state_dict.items():
+        if not k.startswith(prefix):
+            continue
+        k = k.replace(prefix, '')
+        for sp in swaps:
+            k = k.replace(sp[0], sp[1])
 
-def resize_pos_embed(posemb, posemb_new, num_prefix_tokens=1, gs_new=()):
-    # Rescale the grid of position embeddings when loading from state_dict. Adapted from
-    # https://github.com/google-research/vision_transformer/blob/00883dd691c63a6830751563748663526e811cee/vit_jax/checkpoint.py#L224
-    # modify
-    _logger.info('Resized position embedding: %s to %s', posemb.shape, posemb_new.shape)
-    ntok_new = posemb_new.shape[1]
-    if num_prefix_tokens:
-        posemb_prefix, posemb_grid = posemb[:, :num_prefix_tokens], posemb[0, num_prefix_tokens:]
-        # ntok_new -= num_prefix_tokens
-    else:
-        posemb_prefix, posemb_grid = posemb[:, :0], posemb[0]
-    gs_old = int(math.sqrt(len(posemb_grid)))
-    if ntok_new > gs_old ** 2:
-        ntok_new -= gs_old ** 2
-        # expand cls's pos embedding for prompt tokens
-        posemb_prefix = posemb_prefix.expand(-1, ntok_new, -1)
-    if not len(gs_new):  # backwards compatibility
-        gs_new = [int(math.sqrt(ntok_new))] * 2
-    assert len(gs_new) >= 2
-    _logger.info('Position embedding grid-size from %s to %s', [gs_old, gs_old], gs_new)
-    posemb_grid = posemb_grid.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
-    posemb_grid = F.interpolate(posemb_grid, size=gs_new, mode='bicubic', align_corners=False)
-    posemb_grid = posemb_grid.permute(0, 2, 3, 1).reshape(1, gs_new[0] * gs_new[1], -1)
-    posemb = torch.cat([posemb_prefix, posemb_grid], dim=1)
-    return posemb
+        if k == 'proj':
+            k = 'head.weight'
+            v = v.transpose(0, 1)
+            out_dict['head.bias'] = torch.zeros(v.shape[0])
+        elif k == 'class_embedding':
+            k = 'cls_token'
+            v = v.unsqueeze(0).unsqueeze(1)
+        elif k == 'pos_embed':
+            v = v.unsqueeze(0)
+            if v.shape[1] != model.pos_embed.shape[1]:
+                # To resize pos embedding when using model at different size from pretrained weights
+                v = resize_pos_embed(
+                    v,
+                    model.pos_embed,
+                    0 if getattr(model, 'no_embed_class') else getattr(model, 'num_prefix_tokens', 1),
+                    model.patch_embed.grid_size
+                )
+        out_dict[k] = v
+    return out_dict
 
 
-def checkpoint_filter_fn(state_dict, model, adapt_layer_scale=False):
+
+# def checkpoint_filter_fn(state_dict, model, adapt_layer_scale=False):
+#     """ convert patch embedding weight from manual patchify + linear proj to conv"""
+#     import re
+#     out_dict = {}
+#     if 'model' in state_dict:
+#         # For deit models
+#         state_dict = state_dict['model']
+
+#     for k, v in state_dict.items():
+#         if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
+#             # For old models that I trained prior to conv based patchification
+#             O, I, H, W = model.patch_embed.proj.weight.shape
+#             v = v.reshape(O, -1, H, W)
+#         elif k == 'pos_embed' and v.shape[1] != model.pos_embed.shape[1]:
+#             # To resize pos embedding when using model at different size from pretrained weights
+#             v = resize_pos_embed(
+#                 v,
+#                 model.pos_embed,
+#                 0 if getattr(model, 'no_embed_class') else getattr(model, 'num_prefix_tokens', 1),
+#                 model.patch_embed.grid_size
+#             )
+#         elif adapt_layer_scale and 'gamma_' in k:
+#             # remap layer-scale gamma into sub-module (deit3 models)
+#             k = re.sub(r'gamma_([0-9])', r'ls\1.gamma', k)
+#         elif 'pre_logits' in k:
+#             # NOTE representation layer removed as not used in latest 21k/1k pretrained weights
+#             continue
+#         out_dict[k] = v
+#     return out_dict
+
+def checkpoint_filter_fn(
+        state_dict,
+        model,
+        adapt_layer_scale=False,
+        interpolation='bicubic',
+        antialias=True,
+):
     """ convert patch embedding weight from manual patchify + linear proj to conv"""
     import re
     out_dict = {}
-    if 'model' in state_dict:
-        # For deit models
-        state_dict = state_dict['model']
+    state_dict = state_dict.get('model', state_dict)
+    state_dict = state_dict.get('state_dict', state_dict)
+    prefix = ''
+    if 'visual.class_embedding' in state_dict:
+        return _convert_openai_clip(state_dict, model)
+    elif 'module.visual.class_embedding' in state_dict:
+        return _convert_openai_clip(state_dict, model, prefix='module.visual.')
+
+    # if "mask_token" in state_dict:
+    #     state_dict = _convert_dinov2(state_dict, model)
+
+    if "encoder" in state_dict:
+        state_dict = state_dict['encoder']
+        prefix = 'module.'
+
+    if 'visual.trunk.pos_embed' in state_dict:
+        # convert an OpenCLIP model with timm vision encoder
+        # FIXME remap final nn.Linear if it exists outside of the timm .trunk (ie in visual.head.proj)
+        prefix = 'visual.trunk.'
+
+    if prefix:
+        # filter on & remove prefix string from keys
+        state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
 
     for k, v in state_dict.items():
-        if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
-            # For old models that I trained prior to conv based patchification
+        if 'patch_embed.proj.weight' in k:
             O, I, H, W = model.patch_embed.proj.weight.shape
-            v = v.reshape(O, -1, H, W)
+            if len(v.shape) < 4:
+                # For old models that I trained prior to conv based patchification
+                O, I, H, W = model.patch_embed.proj.weight.shape
+                v = v.reshape(O, -1, H, W)
+            if v.shape[-1] != W or v.shape[-2] != H:
+                from timm.layers import resample_patch_embed
+                v = resample_patch_embed(
+                    v,
+                    (H, W),
+                    interpolation=interpolation,
+                    antialias=antialias,
+                    verbose=True,
+                )
         elif k == 'pos_embed' and v.shape[1] != model.pos_embed.shape[1]:
             # To resize pos embedding when using model at different size from pretrained weights
+            num_prefix_tokens = 0 if getattr(model, 'no_embed_class', False) else getattr(model, 'num_prefix_tokens', 1)
+            # from timm.layers import resample_abs_pos_embed
+            # v = resample_abs_pos_embed(
+            #     v,
+            #     new_size=model.patch_embed.grid_size,
+            #     num_prefix_tokens=num_prefix_tokens,
+            #     interpolation=interpolation,
+            #     antialias=antialias,
+            #     verbose=True,
+            # )
             v = resize_pos_embed(
                 v,
                 model.pos_embed,
@@ -810,9 +935,7 @@ def _create_vision_transformer(variant, pretrained=False, **kwargs):
     pretrained_cfg = resolve_pretrained_cfg(variant, pretrained_cfg=kwargs.pop('pretrained_cfg', None))
     model = build_model_with_cfg(
         VisionTransformer, variant, pretrained,
-        pretrained_cfg=pretrained_cfg,
         pretrained_filter_fn=checkpoint_filter_fn,
-        pretrained_custom_load='npz' in pretrained_cfg['url'],
         **kwargs)
     return model
 
@@ -902,6 +1025,15 @@ def vit_base_patch16_224(pretrained=False, **kwargs):
     model = _create_vision_transformer('vit_base_patch16_224', pretrained=pretrained, **model_kwargs)
     return model
 
+@register_model
+def vit_base_patch16_clip_224(pretrained=False, **kwargs) -> VisionTransformer:
+    """ ViT-B/16 CLIP image tower
+    """
+    model_args = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12, norm_layer=nn.LayerNorm)
+    model = _create_vision_transformer(
+        'vit_base_patch16_clip_224', pretrained=pretrained, **dict(model_args, **kwargs))
+    print("Clip model loaded")
+    return model
 
 @register_model
 def vit_base_patch16_384(pretrained=False, **kwargs):

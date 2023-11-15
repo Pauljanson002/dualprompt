@@ -79,7 +79,7 @@ else:
 
 print(f"Creating original model: vit")
 original_model = create_model(
-    "vit_base_patch16_224",
+    "vit_base_patch16_clip_224",
     pretrained=True,
     num_classes=100,
     drop_rate=0.0,
@@ -91,7 +91,7 @@ print(f"Creating model: prompt_vit")
 
 
 model = create_model(
-    "vit_base_patch16_224",
+    "vit_base_patch16_clip_224",
     pretrained=True,
     num_classes=100,
     drop_rate=0.0,
