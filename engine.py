@@ -81,12 +81,12 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
         logits = output['logits']
 
         # here is the trick to mask out classes of non-current tasks
-        # if args.train_mask and class_mask is not None:
+        if args.train_mask and class_mask is not None:
         #     #mask = class_mask[task_id]
-        #     mask = np.array(class_mask[:task_id+1]).flatten().tolist()
-        #     not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
-        #     not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
-        #     logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
+             mask = np.array(class_mask[:task_id+1]).flatten().tolist()
+             not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
+             not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
+             logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
 
         loss = criterion(logits, target) # base criterion (CrossEntropyLoss)
         if args.pull_constraint and 'reduce_sim' in output:
