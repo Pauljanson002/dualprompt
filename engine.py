@@ -16,7 +16,7 @@ import datetime
 import json
 from typing import Iterable
 from pathlib import Path
-
+import wandb
 import torch
 import wandb
 import numpy as np
@@ -30,6 +30,7 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
                     set_training_mode=True, task_id=-1, class_mask=None, args = None,buffer_dataloader=None):
+
 
     model.train(set_training_mode)
     original_model.eval()
@@ -45,9 +46,17 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
     if task_id > 0 and buffer_dataloader is not None:
         iterator = iter(buffer_dataloader)
     
+    
     for input, target in metric_logger.log_every(data_loader, args.print_freq, header):
         input = input.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+        
+        if task_id > 0 and memory_batch is not None:
+            buffer_input, buffer_target = memory_batch
+            buffer_input = buffer_input.to(device, non_blocking=True)
+            buffer_target = buffer_target.to(device, non_blocking=True)
+            input = torch.cat((input, buffer_input), dim=0)
+            target = torch.cat((target, buffer_target), dim=0)
 
         if task_id > 0 and iterator is not None:
             try:
@@ -72,12 +81,12 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
         logits = output['logits']
 
         # here is the trick to mask out classes of non-current tasks
-        if args.train_mask and class_mask is not None:
-            #mask = class_mask[task_id]
-            mask = np.array(class_mask[:task_id+1]).flatten().tolist()
-            not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
-            not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
-            logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
+        # if args.train_mask and class_mask is not None:
+        #     #mask = class_mask[task_id]
+        #     mask = np.array(class_mask[:task_id+1]).flatten().tolist()
+        #     not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
+        #     not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
+        #     logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
 
         loss = criterion(logits, target) # base criterion (CrossEntropyLoss)
         if args.pull_constraint and 'reduce_sim' in output:
@@ -185,7 +194,6 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
 
         result_str += "\tForgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
     print(result_str)
-
     wandb.log(
         {
             "Average/acc@1": avg_stat[0],
@@ -193,6 +201,7 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
             "Average/loss": avg_stat[2],
         }
     )
+
 
     return test_stats
 
@@ -277,12 +286,22 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
            # iterator = iter(buffer_data_loader)
         else:
             buffer_dataloader = None
+
         
-        for epoch in range(args.epochs):            
+        for epoch in range(args.epochs):  
+            if iterator is not None:
+                try:
+                    memory_batch = next(iterator)
+                except StopIteration:
+                    iterator = iter(buffer_data_loader)
+                    memory_batch = next(iterator)
+            else:
+                memory_batch = None          
             train_stats = train_one_epoch(model=model, original_model=original_model, criterion=criterion, 
                                         data_loader=data_loader[task_id]['train'], optimizer=optimizer, 
                                         device=device, epoch=epoch, max_norm=args.clip_grad, 
                                         set_training_mode=True, task_id=task_id, class_mask=class_mask, args=args,buffer_dataloader=buffer_dataloader)
+
             
             if lr_scheduler:
                 lr_scheduler.step(epoch)

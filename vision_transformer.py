@@ -41,6 +41,10 @@ from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_n
 from timm.models.registry import register_model
 from timm.layers import resample_patch_embed, resample_abs_pos_embed
 
+
+OPENAI_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+OPENAI_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
 from prompt import EPrompt
 from attention import PreT_Attention
 
@@ -611,9 +615,42 @@ class VisionTransformer(nn.Module):
         
         return res
 
+
+    def forward_lang(self, res, pre_logits: bool = False):
+        x = res['x']
+        if self.class_token and self.head_type == 'token':
+            x = x[:, 0]
+        elif self.head_type == 'gap' and self.global_pool == 'avg':
+            x = x.mean(dim=1)
+        elif self.head_type == 'prompt' and self.prompt_pool:
+            x = x[:, 1:(1 + self.total_prompt_len)] if self.class_token else x[:, 0:self.total_prompt_len]
+            x = x.mean(dim=1)
+        elif self.head_type == 'token+prompt' and self.prompt_pool and self.class_token:
+            x = x[:, 0:self.total_prompt_len + 1]
+            x = x.mean(dim=1)
+        else:
+            raise ValueError(f'Invalid classifier={self.classifier}')
+        
+        res['pre_logits'] = x
+
+        x = x @ self.proj
+        x = x / x.norm(dim=1, keepdim=True)
+        text_features = self.text_features / self.text_features.norm(dim=1, keepdim=True)
+        logits_per_image = self.logit_scale * x @ text_features.t()
+        logits_per_text = logits_per_image.t()
+        res['logits'] = logits_per_image
+        res["logits_per_text"] = logits_per_text
+        
+        # text_features_unselected = self.text_features/self.text_features.norm(dim=1, keepdim=True)
+        # logits_per_image_unselected = self.logit_scale * x @ text_features_unselected.t()
+        # res['logits_unselected'] = logits_per_image_unselected
+        
+        return res
+
     def forward(self, x, task_id=-1, cls_features=None, train=False):
         res = self.forward_features(x, task_id=task_id, cls_features=cls_features, train=train)
-        res = self.forward_head(res)
+        # res = self.forward_head(res)
+        res = self.forward_lang(res)
         return res
 
 
@@ -753,6 +790,40 @@ def _load_weights(model: VisionTransformer, checkpoint_path: str, prefix: str = 
         block.norm2.weight.copy_(_n2p(w[f'{block_prefix}LayerNorm_2/scale']))
         block.norm2.bias.copy_(_n2p(w[f'{block_prefix}LayerNorm_2/bias']))
 
+def _convert_openai_clip(state_dict, model, prefix='visual.'):
+    out_dict = {}
+    swaps = [
+        ('conv1', 'patch_embed.proj'), ('positional_embedding', 'pos_embed'),
+        ('transformer.resblocks.', 'blocks.'), ('ln_pre', 'norm_pre'), ('ln_post', 'norm'), ('ln_', 'norm'),
+        ('in_proj_', 'qkv.'), ('out_proj', 'proj'), ('mlp.c_fc', 'mlp.fc1'), ('mlp.c_proj', 'mlp.fc2'),
+    ]
+    for k, v in state_dict.items():
+        if not k.startswith(prefix):
+            continue
+        k = k.replace(prefix, '')
+        for sp in swaps:
+            k = k.replace(sp[0], sp[1])
+
+        if k == 'proj':
+            k = 'head.weight'
+            v = v.transpose(0, 1)
+            out_dict['head.bias'] = torch.zeros(v.shape[0])
+        elif k == 'class_embedding':
+            k = 'cls_token'
+            v = v.unsqueeze(0).unsqueeze(1)
+        elif k == 'pos_embed':
+            v = v.unsqueeze(0)
+            if v.shape[1] != model.pos_embed.shape[1]:
+                # To resize pos embedding when using model at different size from pretrained weights
+                v = resize_pos_embed(
+                    v,
+                    model.pos_embed,
+                    0 if getattr(model, 'no_embed_class') else getattr(model, 'num_prefix_tokens', 1),
+                    model.patch_embed.grid_size
+                )
+        out_dict[k] = v
+    return out_dict
+
 
 def resize_pos_embed(posemb, posemb_new, num_prefix_tokens=1, gs_new=()):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
@@ -815,6 +886,7 @@ def _convert_openai_clip(state_dict, model, prefix='visual.'):
     return out_dict
 
 
+
 def checkpoint_filter_fn(
         state_dict,
         model,
@@ -828,6 +900,8 @@ def checkpoint_filter_fn(
     state_dict = state_dict.get('model', state_dict)
     state_dict = state_dict.get('state_dict', state_dict)
     prefix = ''
+
+
 
     if 'visual.class_embedding' in state_dict:
         return _convert_openai_clip(state_dict, model)
@@ -858,6 +932,7 @@ def checkpoint_filter_fn(
                 O, I, H, W = model.patch_embed.proj.weight.shape
                 v = v.reshape(O, -1, H, W)
             if v.shape[-1] != W or v.shape[-2] != H:
+
                 v = resample_patch_embed(
                     v,
                     (H, W),

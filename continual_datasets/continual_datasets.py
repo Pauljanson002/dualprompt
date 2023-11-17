@@ -448,6 +448,7 @@ class Aircraft(torch.utils.data.Dataset):
             self.dataset = FGVCAircraft(root, split='test',transform=transform, download=True)
         self.transform = transform
         self.targets = [self.dataset[i][1] for i in range(len(self.dataset))]
+
         self.classes = [
     '707-320',
     '727-200',
@@ -551,7 +552,9 @@ class Aircraft(torch.utils.data.Dataset):
     'Yak-42',
 ]
 
+
         
+
         
     def __len__(self):
         return len(self.dataset)
@@ -786,6 +789,8 @@ class Country211(torch.utils.data.Dataset):
 ]
     
 
+
+
     def __len__(self):
         return len(self.dataset)
     def __getitem__(self, idx):
@@ -849,6 +854,8 @@ class GTSRB(torch.utils.data.Dataset):
 ]
     
 
+
+
     def __len__(self):
         return len(self.dataset)
     def __getitem__(self, idx):
@@ -860,19 +867,20 @@ class GTSRB(torch.utils.data.Dataset):
 from torchvision.datasets import ImageFolder
 class Birdsnap(torch.utils.data.Dataset):
     def __init__(self,root="/home/paulj/data/birdsnap/download/images",split="train",transform=None,target_transform=None,download=False):
-        self.root = root
+        self.root = "/home/paulj/data/birdsnap/download/images"
         self.set = ImageFolder("/home/paulj/data/birdsnap/download/images")
         self.idx_dir = "/home/paulj/data/birdsnap/"
         with open(f'{self.idx_dir}/test_images.txt','r') as f:
             lines = f.readlines()
             test_paths = [os.path.join(self.root,line.strip()) for line in lines if 'jpg' in line]
         test_indices = [idx for idx, ( path,_) in enumerate(self.set.samples) if path in test_paths]
+        self.targets = np.array(self.set.targets)
         train_indices = [idx for idx in range(len(self.set)) if idx not in test_indices]
         if split == "train":
             self.set = torch.utils.data.Subset(self.set,train_indices)
         else:
             self.set = torch.utils.data.Subset(self.set,test_indices)
-        self.targets = [self.set[i][1] for i in range(len(self.set))]
+        self.targets = self.targets[train_indices] if split == "train" else self.targets[test_indices]
         self.transform = transform
         self.classes = [
     'Acadian Flycatcher',

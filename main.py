@@ -14,7 +14,7 @@ import numpy as np
 import time
 import torch
 import torch.backends.cudnn as cudnn
-
+import clip
 from pathlib import Path
 
 from timm.models import create_model
@@ -57,6 +57,7 @@ def main(args):
 
     cudnn.benchmark = True
     
+
     wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="online",tags=["dualprompt","cvpr"])
     args.name = f"dualprompt_{args.dataset}_{args.model.replace('.','_')}"
     data_loader, class_mask,main_buffer , dataset_train = build_continual_dataloader(args)
@@ -110,7 +111,6 @@ def main(args):
     )
     original_model.to(device)
     model.to(device)  
-
     if args.freeze:
         # all parameters are frozen for original vit model
         for p in original_model.parameters():
@@ -197,7 +197,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DualPrompt training and evaluation configs')
-    
+    parser.add_argument("--buffer_size", type=int, default=2000, help="buffer size for each task")
     config = parser.parse_known_args()[-1][0]
 
     subparser = parser.add_subparsers(dest='subparser_name')
@@ -208,7 +208,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 2000
+        if args.buffer_size == 2000:
+            args.memory = 2000
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 100
     elif config == "cub_dualprompt":
         from configs.cub_dualprompt import get_args_parser
@@ -216,7 +219,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 240
+        if args.buffer_size == 2000:
+            args.memory = 240
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 200
     elif config == "cars_dualprompt":
         from configs.cars_dualprompt import get_args_parser
@@ -224,7 +230,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 240
+        if args.buffer_size == 2000:
+            args.memory = 240
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 190
     elif config == "aircraft_dualprompt":
         from configs.aircraft_dualprompt import get_args_parser
@@ -232,7 +241,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 250
+        if args.buffer_size == 2000:
+            args.memory = 250
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 100
     elif config == "country_dualprompt":
         from configs.country_dualprompt import get_args_parser
@@ -240,7 +252,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 1000
+        if args.buffer_size == 2000:
+            args.memory = 1000
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 200
     elif config == "gtsrb_dualprompt":
         from configs.gtsrb_dualprompt import get_args_parser
@@ -248,7 +263,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 1000
+        if args.buffer_size == 2000:
+            args.memory = 1000
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 40
     elif config == "birdsnap_dualprompt":
         from configs.birdsnap_dualprompt import get_args_parser
@@ -256,7 +274,10 @@ if __name__ == '__main__':
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
-        args.memory = 1500
+        if args.buffer_size == 2000:
+            args.memory = 1500
+        else:
+            args.memory = args.buffer_size
         args.nb_classes = 500
     elif config == 'imr_dualprompt':
         from configs.imr_dualprompt import get_args_parser
