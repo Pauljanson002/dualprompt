@@ -35,10 +35,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD,OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 from timm.models.helpers import build_model_with_cfg, resolve_pretrained_cfg, named_apply, adapt_input_conv, checkpoint_seq
 from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
 from timm.models.registry import register_model
+from timm.layers import resample_patch_embed, resample_abs_pos_embed
 
 from prompt import EPrompt
 from attention import PreT_Attention
@@ -90,8 +91,14 @@ default_cfgs = {
     # 'vit_base_patch16_224': _cfg(
     #     url='https://storage.googleapis.com/vit_models/augreg/'
     #         'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_224.npz'),
+    'vit_base_patch16_clip_224.openai': _cfg(
+        hf_hub_id='timm/vit_base_patch16_clip_224.openai',
+        notes=('natively QuickGELU, use quickgelu model variant for original results',),
+        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD, num_classes=512),
     'vit_base_patch16_224': _cfg(
-        url='https://storage.googleapis.com/vit_models/imagenet21k/ViT-B_16.npz'),
+        url='https://storage.googleapis.com/vit_models/imagenet21k/ViT-B_16.npz',
+        custom_load=True,
+        ),
     'vit_base_patch16_384': _cfg(
         url='https://storage.googleapis.com/vit_models/augreg/'
             'B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.01-res_384.npz',
@@ -338,7 +345,7 @@ class VisionTransformer(nn.Module):
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
             top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
             use_g_prompt=False, g_prompt_length=None, g_prompt_layer_idx=None, use_prefix_tune_for_g_prompt=False,
-            use_e_prompt=False, e_prompt_layer_idx=None, use_prefix_tune_for_e_prompt=False, same_key_value=False,):
+            use_e_prompt=False, e_prompt_layer_idx=None, use_prefix_tune_for_e_prompt=False, same_key_value=False,pre_norm: bool = False,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -381,13 +388,14 @@ class VisionTransformer(nn.Module):
         self.grad_checkpointing = False
 
         self.patch_embed = embed_layer(
-            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,bias=not pre_norm)
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
         embed_len = num_patches if no_embed_class else num_patches + self.num_prefix_tokens
         self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
         self.pos_drop = nn.Dropout(p=drop_rate)
+        self.norm_pre = norm_layer(embed_dim) if pre_norm else nn.Identity()
 
         self.prompt_pool = prompt_pool
         self.head_type = head_type
@@ -469,6 +477,7 @@ class VisionTransformer(nn.Module):
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.proj = None
 
         if weight_init != 'skip':
             self.init_weights(weight_init)
@@ -522,7 +531,7 @@ class VisionTransformer(nn.Module):
             x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         
         x = self.pos_drop(x + self.pos_embed)
-
+        x = self.norm_pre(x)
         if self.grad_checkpointing and not torch.jit.is_scripting():
             x = checkpoint_seq(self.blocks, x)
         else:
@@ -771,27 +780,101 @@ def resize_pos_embed(posemb, posemb_new, num_prefix_tokens=1, gs_new=()):
     posemb = torch.cat([posemb_prefix, posemb_grid], dim=1)
     return posemb
 
+def _convert_openai_clip(state_dict, model, prefix='visual.'):
+    out_dict = {}
+    swaps = [
+        ('conv1', 'patch_embed.proj'), ('positional_embedding', 'pos_embed'),
+        ('transformer.resblocks.', 'blocks.'), ('ln_pre', 'norm_pre'), ('ln_post', 'norm'), ('ln_', 'norm'),
+        ('in_proj_', 'qkv.'), ('out_proj', 'proj'), ('mlp.c_fc', 'mlp.fc1'), ('mlp.c_proj', 'mlp.fc2'),
+    ]
+    for k, v in state_dict.items():
+        if not k.startswith(prefix):
+            continue
+        k = k.replace(prefix, '')
+        for sp in swaps:
+            k = k.replace(sp[0], sp[1])
 
-def checkpoint_filter_fn(state_dict, model, adapt_layer_scale=False):
+        if k == 'proj':
+            k = 'head.weight'
+            v = v.transpose(0, 1)
+            out_dict['head.bias'] = torch.zeros(v.shape[0])
+        elif k == 'class_embedding':
+            k = 'cls_token'
+            v = v.unsqueeze(0).unsqueeze(1)
+        elif k == 'pos_embed':
+            v = v.unsqueeze(0)
+            if v.shape[1] != model.pos_embed.shape[1]:
+                # To resize pos embedding when using model at different size from pretrained weights
+                v = resize_pos_embed(
+                    v,
+                    model.pos_embed,
+                    0 if getattr(model, 'no_embed_class') else getattr(model, 'num_prefix_tokens', 1),
+                    model.patch_embed.grid_size
+                )
+        out_dict[k] = v
+    return out_dict
+
+
+def checkpoint_filter_fn(
+        state_dict,
+        model,
+        adapt_layer_scale=False,
+        interpolation='bicubic',
+        antialias=True,
+):
     """ convert patch embedding weight from manual patchify + linear proj to conv"""
     import re
     out_dict = {}
-    if 'model' in state_dict:
-        # For deit models
-        state_dict = state_dict['model']
+    state_dict = state_dict.get('model', state_dict)
+    state_dict = state_dict.get('state_dict', state_dict)
+    prefix = ''
+
+    if 'visual.class_embedding' in state_dict:
+        return _convert_openai_clip(state_dict, model)
+    elif 'module.visual.class_embedding' in state_dict:
+        return _convert_openai_clip(state_dict, model, prefix='module.visual.')
+
+    # if "mask_token" in state_dict:
+    #     state_dict = _convert_dinov2(state_dict, model)
+
+    if "encoder" in state_dict:
+        state_dict = state_dict['encoder']
+        prefix = 'module.'
+
+    if 'visual.trunk.pos_embed' in state_dict:
+        # convert an OpenCLIP model with timm vision encoder
+        # FIXME remap final nn.Linear if it exists outside of the timm .trunk (ie in visual.head.proj)
+        prefix = 'visual.trunk.'
+
+    if prefix:
+        # filter on & remove prefix string from keys
+        state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
 
     for k, v in state_dict.items():
-        if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
-            # For old models that I trained prior to conv based patchification
+        if 'patch_embed.proj.weight' in k:
             O, I, H, W = model.patch_embed.proj.weight.shape
-            v = v.reshape(O, -1, H, W)
+            if len(v.shape) < 4:
+                # For old models that I trained prior to conv based patchification
+                O, I, H, W = model.patch_embed.proj.weight.shape
+                v = v.reshape(O, -1, H, W)
+            if v.shape[-1] != W or v.shape[-2] != H:
+                v = resample_patch_embed(
+                    v,
+                    (H, W),
+                    interpolation=interpolation,
+                    antialias=antialias,
+                    verbose=True,
+                )
         elif k == 'pos_embed' and v.shape[1] != model.pos_embed.shape[1]:
             # To resize pos embedding when using model at different size from pretrained weights
-            v = resize_pos_embed(
+            num_prefix_tokens = 0 if getattr(model, 'no_embed_class', False) else getattr(model, 'num_prefix_tokens', 1)
+            v = resample_abs_pos_embed(
                 v,
-                model.pos_embed,
-                0 if getattr(model, 'no_embed_class') else getattr(model, 'num_prefix_tokens', 1),
-                model.patch_embed.grid_size
+                new_size=model.patch_embed.grid_size,
+                num_prefix_tokens=num_prefix_tokens,
+                interpolation=interpolation,
+                antialias=antialias,
+                verbose=True,
             )
         elif adapt_layer_scale and 'gamma_' in k:
             # remap layer-scale gamma into sub-module (deit3 models)
@@ -803,18 +886,32 @@ def checkpoint_filter_fn(state_dict, model, adapt_layer_scale=False):
     return out_dict
 
 
+
 def _create_vision_transformer(variant, pretrained=False, **kwargs):
     if kwargs.get('features_only', None):
         raise RuntimeError('features_only not implemented for Vision Transformer models.')
 
-    pretrained_cfg = resolve_pretrained_cfg(variant, pretrained_cfg=kwargs.pop('pretrained_cfg', None))
-    model = build_model_with_cfg(
-        VisionTransformer, variant, pretrained,
-        pretrained_cfg=pretrained_cfg,
-        pretrained_filter_fn=checkpoint_filter_fn,
-        pretrained_custom_load='npz' in pretrained_cfg['url'],
-        **kwargs)
-    return model
+    if 'flexi' in variant:
+        # FIXME Google FlexiViT pretrained models have a strong preference for bilinear patch / embed
+        # interpolation, other pretrained models resize better w/ anti-aliased bicubic interpolation.
+        _filter_fn = partial(checkpoint_filter_fn, interpolation='bilinear', antialias=False)
+    else:
+        _filter_fn = checkpoint_filter_fn
+
+    # FIXME attn pool (currently only in siglip) params removed if pool disabled, is there a better soln?
+    strict = True
+    if 'siglip' in variant and kwargs.get('global_pool', None) != 'map':
+        strict = False
+
+    return build_model_with_cfg(
+        VisionTransformer,
+        variant,
+        pretrained,
+        pretrained_filter_fn=_filter_fn,
+        pretrained_strict=strict,
+        **kwargs,
+    )
+
 
 
 @register_model
@@ -901,6 +998,16 @@ def vit_base_patch16_224(pretrained=False, **kwargs):
     model_kwargs = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12, **kwargs)
     model = _create_vision_transformer('vit_base_patch16_224', pretrained=pretrained, **model_kwargs)
     return model
+
+@register_model
+def vit_base_patch16_clip_224(pretrained=False, **kwargs) -> VisionTransformer:
+    """ ViT-B/16 CLIP image tower
+    """
+    model_args = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12, pre_norm=True, norm_layer=nn.LayerNorm)
+    model = _create_vision_transformer(
+        'vit_base_patch16_clip_224', pretrained=pretrained, **dict(model_args, **kwargs))
+    return model
+
 
 
 @register_model

@@ -29,7 +29,7 @@ import utils
 def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    set_training_mode=True, task_id=-1, class_mask=None, args = None,):
+                    set_training_mode=True, task_id=-1, class_mask=None, args = None,buffer_dataloader=None):
 
     model.train(set_training_mode)
     original_model.eval()
@@ -41,10 +41,25 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
     metric_logger.add_meter('Lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('Loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     header = f'Train: Epoch[{epoch+1:{int(math.log10(args.epochs))+1}}/{args.epochs}]'
+
+    if task_id > 0 and buffer_dataloader is not None:
+        iterator = iter(buffer_dataloader)
     
     for input, target in metric_logger.log_every(data_loader, args.print_freq, header):
         input = input.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+
+        if task_id > 0 and iterator is not None:
+            try:
+                memory_batch = next(iterator)
+            except StopIteration:
+                iterator = iter(buffer_dataloader)
+                memory_batch = next(iterator)
+            buffer_input, buffer_target = memory_batch
+            buffer_input = buffer_input.to(device, non_blocking=True)
+            buffer_target = buffer_target.to(device, non_blocking=True)
+            input = torch.cat((input, buffer_input), dim=0)
+            target = torch.cat((target, buffer_target), dim=0)
 
         with torch.no_grad():
             if original_model is not None:
@@ -171,11 +186,19 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
         result_str += "\tForgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
     print(result_str)
 
+    wandb.log(
+        {
+            "Average/acc@1": avg_stat[0],
+            "Average/acc@5": avg_stat[1],
+            "Average/loss": avg_stat[2],
+        }
+    )
+
     return test_stats
 
 def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer, lr_scheduler, device: torch.device, 
-                    class_mask=None, args = None,):
+                    class_mask=None, args = None,dataset_train=None):
 
     # create matrix to save end-of-task accuracies 
     acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
@@ -228,12 +251,38 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         # Create new optimizer for each task to clear optimizer status
         if task_id > 0 and args.reinit_optimizer:
             optimizer = create_optimizer(args, model)
+            if model.proj is not None:
+                optimizer.add_param_group({
+                    "params": [model.proj],
+                    "lr": args.lr * 1e-2,
+                })
+
+        def collate_fn(examples):
+            images = []
+            labels = []
+            for example in examples:
+                if example[0].shape[0] == 3:
+                    images.append(example[0])
+                    labels.append(example[1])
+            pixel_values = torch.stack(images)
+            labels = torch.tensor(labels)
+            return pixel_values, labels
+
+        if task_id > 0 and dataset_train is not None:
+            buffer_subset = torch.utils.data.Subset(dataset_train, args.main_buffer[task_id-1])
+            buffer_dataloader = torch.utils.data.DataLoader(
+                buffer_subset,args.batch_size,shuffle=True,collate_fn=collate_fn
+            )
+            # check if iterator is reached to the end
+           # iterator = iter(buffer_data_loader)
+        else:
+            buffer_dataloader = None
         
         for epoch in range(args.epochs):            
             train_stats = train_one_epoch(model=model, original_model=original_model, criterion=criterion, 
                                         data_loader=data_loader[task_id]['train'], optimizer=optimizer, 
                                         device=device, epoch=epoch, max_norm=args.clip_grad, 
-                                        set_training_mode=True, task_id=task_id, class_mask=class_mask, args=args,)
+                                        set_training_mode=True, task_id=task_id, class_mask=class_mask, args=args,buffer_dataloader=buffer_dataloader)
             
             if lr_scheduler:
                 lr_scheduler.step(epoch)
