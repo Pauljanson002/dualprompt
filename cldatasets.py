@@ -69,6 +69,7 @@ def build_continual_dataloader(args):
         dataset_train, dataset_val = get_dataset('birdsnap', transform_train, transform_val, args)
         # args.nb_classes = len(dataset_val.classes)
         args.nb_classes = 500
+
         splited_datasets, class_mask,main_buffer = split_single_dataset(dataset_train, dataset_val, args)
     else:
         if args.dataset == '5-datasets':
@@ -81,7 +82,11 @@ def build_continual_dataloader(args):
         print(dataset_list)
     
         args.nb_classes = 0
+
+    
     full_dataset_train = dataset_train
+
+
     for i in range(args.num_tasks):
         if args.dataset.startswith('Split-'):
             dataset_train, dataset_val = splited_dataset[i]
@@ -141,7 +146,38 @@ def build_continual_dataloader(args):
 
         dataloader.append({'train': data_loader_train, 'val': data_loader_val})
 
-    return dataloader, class_mask,main_buffer,full_dataset_train
+
+    return dataloader, class_mask,main_buffer, full_dataset_train
+
+
+
+def get_classnames(args):
+    transform_train = build_transform(True, args)
+    transform_val = build_transform(False, args)
+    if args.dataset.startswith('Split-'):
+        ds,_ = get_dataset(args.dataset.replace('Split-',''), transform_train, transform_val, args)
+        return ds.classes
+    elif args.dataset == "cub":
+        ds,_ = get_dataset('CUB200', transform_train, transform_val, args)
+        return ds.classes
+    elif args.dataset == "cars":
+        ds,_ = get_dataset('cars', transform_train, transform_val, args)
+        return ds.classes
+    elif args.dataset == "aircraft":
+        ds,_ = get_dataset('aircraft', transform_train, transform_val, args)
+        return ds.classes
+    elif args.dataset == "country":
+        ds,_ = get_dataset('country', transform_train, transform_val, args)
+        return ds.classes
+    elif args.dataset == "gtsrb":
+        ds,_ = get_dataset('gtsrb', transform_train, transform_val, args)
+        return ds.classes
+    elif args.dataset == "birdsnap":
+        ds,_ = get_dataset('birdsnap', transform_train, transform_val, args)
+        return ds.classes
+    else:
+        NotImplementedError()
+
 
 def get_dataset(dataset, transform_train, transform_val, args,):
     if dataset == 'CIFAR100':
@@ -245,7 +281,12 @@ def get_classnames(args):
 
 
 def split_single_dataset(dataset_train, dataset_val, args):
-    nb_classes = args.nb_classes
+    if args.dataset == "cars":
+        nb_classes = len(dataset_val.classes) - 6
+    elif args.dataset == "gtsrb":
+        nb_classes = 40
+    else:
+        nb_classes = args.nb_classes
     assert nb_classes % args.num_tasks == 0
     classes_per_task = nb_classes // args.num_tasks
 
@@ -253,14 +294,12 @@ def split_single_dataset(dataset_train, dataset_val, args):
     
     split_datasets = list()
     mask = list()
-
+    
     if args.shuffle:
         random.shuffle(labels)
-    
     buffer = [[] for _ in range(args.nb_classes)]
     main_buffer = []
     for t in range(args.num_tasks):
-          
         train_split_indices = []
         test_split_indices = []
         
@@ -271,6 +310,7 @@ def split_single_dataset(dataset_train, dataset_val, args):
         for k in range(len(dataset_train.targets)):
             if int(dataset_train.targets[k]) in scope:
                 train_split_indices.append(k)
+
                 
         for h in range(len(dataset_val.targets)):
             if int(dataset_val.targets[h]) in scope:
@@ -278,16 +318,18 @@ def split_single_dataset(dataset_train, dataset_val, args):
         
         buffer_per_class = args.memory // (classes_per_task* (t+1))
 
+        for k in range(len(dataset_train.targets)):
+            if int(dataset_train.targets[k]) in scope:
+                buffer[int(dataset_train.targets[k])].append(k)
+
         for i in range(len(buffer)):
+            random.shuffle(buffer[i])
             buffer[i] = buffer[i][:buffer_per_class]
             print(f"buffer[{i}] : {len(buffer[i])}")
-        for k in range(len(dataset_train.targets)):
-            if int(dataset_train.targets[k]) in scope and len(buffer[int(dataset_train.targets[k])]) < buffer_per_class:
-                buffer[int(dataset_train.targets[k])].append(k)        
+            
         buffer_flat = list(chain.from_iterable(buffer))
         main_buffer.append(buffer_flat)
         subset_train, subset_val =  Subset(dataset_train, train_split_indices), Subset(dataset_val, test_split_indices)
-
         split_datasets.append([subset_train, subset_val])
     
     return split_datasets, mask,main_buffer

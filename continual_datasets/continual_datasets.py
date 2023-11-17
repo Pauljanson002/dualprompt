@@ -448,7 +448,9 @@ class Aircraft(torch.utils.data.Dataset):
             self.dataset = FGVCAircraft(root, split='test',transform=transform, download=True)
         self.transform = transform
         self.targets = [self.dataset[i][1] for i in range(len(self.dataset))]
-        self.classes = ['707-320',
+
+        self.classes = [
+    '707-320',
     '727-200',
     '737-200',
     '737-300',
@@ -549,6 +551,9 @@ class Aircraft(torch.utils.data.Dataset):
     'Tu-154',
     'Yak-42',
 ]
+
+
+        
 
         
     def __len__(self):
@@ -783,6 +788,9 @@ class Country211(torch.utils.data.Dataset):
     'Zimbabwe',
 ]
     
+
+
+
     def __len__(self):
         return len(self.dataset)
     def __getitem__(self, idx):
@@ -845,6 +853,9 @@ class GTSRB(torch.utils.data.Dataset):
     'white circle with gray strike bar indicating no passing for trucks has ended',
 ]
     
+
+
+
     def __len__(self):
         return len(self.dataset)
     def __getitem__(self, idx):

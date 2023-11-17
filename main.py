@@ -25,9 +25,24 @@ from cldatasets import build_continual_dataloader,get_classnames
 from engine import *
 import models
 import utils
+import clip
 import wandb
 import warnings
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
+
+
+def quick_gelu(x: torch.Tensor, inplace: bool = False) -> torch.Tensor:
+    return x * torch.sigmoid(1.702 * x)
+
+
+class QuickGELU(torch.nn.Module):
+    """Applies the Gaussian Error Linear Units function (w/ dummy inplace arg)
+    """
+    def __init__(self, inplace: bool = False):
+        super(QuickGELU, self).__init__()
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return quick_gelu(input)
 
 def main(args):
     utils.init_distributed_mode(args)
@@ -42,12 +57,19 @@ def main(args):
 
     cudnn.benchmark = True
     
-    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="disabled")
-    args.name = f"dualprompt_{args.dataset}"
 
-    data_loader, class_mask ,main_buffer,dataset_train = build_continual_dataloader(args)
+    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}", config=vars(args),mode="online",tags=["dualprompt","cvpr"])
+    args.name = f"dualprompt_{args.dataset}_{args.model.replace('.','_')}"
+    data_loader, class_mask,main_buffer , dataset_train = build_continual_dataloader(args)
+
 
     print(f"Creating original model: {args.model}")
+
+    act_layer = torch.nn.GELU
+    if args.model == "vit_base_patch16_clip_224.openai":
+        act_layer = QuickGELU
+
+
     original_model = create_model(
         args.model,
         pretrained=args.pretrained,
@@ -55,6 +77,7 @@ def main(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
+        act_layer=act_layer,
     )
 
     print(f"Creating model: {args.model}")
@@ -84,6 +107,7 @@ def main(args):
         e_prompt_layer_idx=args.e_prompt_layer_idx,
         use_prefix_tune_for_e_prompt=args.use_prefix_tune_for_e_prompt,
         same_key_value=args.same_key_value,
+        act_layer=act_layer,
     )
     original_model.to(device)
     model.to(device)  
@@ -96,28 +120,24 @@ def main(args):
         for n, p in model.named_parameters():
             if n.startswith(tuple(args.freeze)):
                 p.requires_grad = False
-                
-    model.classnames = get_classnames(args)
+        model.classnames = get_classnames(args)
     text_encodings = clip.tokenize(model.classnames).to(device)
     clip_model, _ = clip.load("ViT-B/16", device="cuda")
     for param in clip_model.parameters():
         param.requires_grad = False
-    original_model.proj = clip_model.visual.proj.float()
-    original_model.text_features = clip_model.encode_text(text_encodings).float()
-    original_model.logit_scale = clip_model.logit_scale.exp().float()
-    model.proj = clip_model.visual.proj.float()
-    model.proj.requires_grad = True
-    model.text_features = clip_model.encode_text(text_encodings).float()
-    model.logit_scale = clip_model.logit_scale.exp().float()
-
-    number_of_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    ratio = number_of_trainable_params / total_params
-    print(f"Number of trainable parameters: {number_of_trainable_params}")
-    print(f"Total number of parameters: {total_params}")
-    print(f"Ratio: {ratio}")
-    args.main_buffer = main_buffer
+    if args.model == "vit_base_patch16_clip_224.openai":
+        original_model.proj = clip_model.visual.proj.float()
+        original_model.text_features = clip_model.encode_text(text_encodings).float()
+        original_model.logit_scale = clip_model.logit_scale.exp().float()
+        model.proj = clip_model.visual.proj.float()
+        model.proj.requires_grad = True
+        model.text_features = clip_model.encode_text(text_encodings).float()
+        model.text_features.requires_grad = False
+        model.logit_scale = clip_model.logit_scale.exp().float()
+        model.logit_scale.requires_grad = False
+    
     print(args)
+    args.main_buffer = main_buffer
 
     if args.eval:
         acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
@@ -151,10 +171,11 @@ def main(args):
     args.lr = args.lr * global_batch_size / 256.0
 
     optimizer = create_optimizer(args, model_without_ddp)
-    optimizer.add_param_group({
-        "params": [model.proj],
-        "lr": args.lr * 1e-2,
-    })
+    if args.model == "vit_base_patch16_clip_224.openai":
+        optimizer.add_param_group({
+            "params": [model.proj],
+            "lr": args.lr * 1e-2,
+        })
 
     if args.sched != 'constant':
         lr_scheduler, _ = create_scheduler(args, optimizer)
