@@ -287,28 +287,29 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             if lr_scheduler:
                 lr_scheduler.step(epoch)
 
-        test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader, device=device, 
-                                    task_id=task_id, class_mask=class_mask, acc_matrix=acc_matrix, args=args)
-        if args.output_dir and utils.is_main_process():
-            Path(os.path.join(args.output_dir, f'checkpoint_{args.name}')).mkdir(parents=True, exist_ok=True)
-            
-            checkpoint_path = os.path.join(args.output_dir, f'checkpoint_{args.name}/task{task_id+1}_checkpoint.pth')
-            state_dict = {
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }
-            if args.sched is not None and args.sched != 'constant':
-                state_dict['lr_scheduler'] = lr_scheduler.state_dict()
-            
-            utils.save_on_master(state_dict, checkpoint_path)
+        if task_id == args.num_tasks - 1:
+            test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader, device=device, 
+                                        task_id=task_id, class_mask=class_mask, acc_matrix=acc_matrix, args=args)
+            if args.output_dir and utils.is_main_process():
+                Path(os.path.join(args.output_dir, f'checkpoint_{args.name}')).mkdir(parents=True, exist_ok=True)
+                
+                checkpoint_path = os.path.join(args.output_dir, f'checkpoint_{args.name}/task{task_id+1}_checkpoint.pth')
+                state_dict = {
+                        'model': model_without_ddp.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'args': args,
+                    }
+                if args.sched is not None and args.sched != 'constant':
+                    state_dict['lr_scheduler'] = lr_scheduler.state_dict()
+                
+                utils.save_on_master(state_dict, checkpoint_path)
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-            **{f'test_{k}': v for k, v in test_stats.items()},
-            'epoch': epoch,}
-        wandb.log(log_stats)
+            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                **{f'test_{k}': v for k, v in test_stats.items()},
+                'epoch': epoch,}
+            wandb.log(log_stats)
 
-        if args.output_dir and utils.is_main_process():
-            with open(os.path.join(args.output_dir, '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))), 'a') as f:
-                f.write(json.dumps(log_stats) + '\n')
+            if args.output_dir and utils.is_main_process():
+                with open(os.path.join(args.output_dir, '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))), 'a') as f:
+                    f.write(json.dumps(log_stats) + '\n')

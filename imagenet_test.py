@@ -1,15 +1,8 @@
-# ------------------------------------------
-# Copyright (c) 2015-present, Facebook, Inc.
-# All rights reserved.
-# ------------------------------------------
-# Modification:
-# Added code for dualprompt implementation
-# -- Jaeho Lee, dlwogh9344@khu.ac.kr
-# ------------------------------------------
 import sys
 import argparse
 import datetime
 import random
+from typing import Any
 import numpy as np
 import time
 import torch
@@ -24,13 +17,13 @@ from timm.optim import create_optimizer
 from cldatasets import build_continual_dataloader,get_classnames
 from engine import *
 import models
+from torchvision import transforms
 import utils
-import clip
 import wandb
 import warnings
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
-
-
+import clip
+from torchvision.datasets import ImageFolder
 def quick_gelu(x: torch.Tensor, inplace: bool = False) -> torch.Tensor:
     return x * torch.sigmoid(1.702 * x)
 
@@ -44,31 +37,60 @@ class QuickGELU(torch.nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return quick_gelu(input)
 
+
+class ImageNet(ImageFolder):
+    def __init__(self,transform):
+        root = '/home/paulj/data/imagenet/val'
+        super().__init__(root,transform)
+        folder_to_classes = {}
+        with open('/home/paulj/data/imagenet/imagenet_class_name.txt','r') as f:
+            for line in f.readlines():
+                folder,_,class_name = line.strip().split()
+                folder_to_classes[folder] = class_name
+        for i,folder in enumerate(self.classes):
+            self.classes[i] = folder_to_classes[folder]
+
+
+
+
+
 def main(args):
     utils.init_distributed_mode(args)
 
-    device = torch.device(args.device)
-
-    # fix the seed for reproducibility
+    device = torch.device("cuda")
     seed = args.seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+    args.model = "vit_base_patch16_clip_224.openai"
 
     cudnn.benchmark = True
-    
-    wandb.init(project="precontinual", name=f"dualprompt_{args.dataset}_{args.model.replace('.','_')}", config=vars(args),mode="online",tags=["dualprompt","cvpr"])
-    args.name = f"dualprompt_{args.dataset}_{args.model.replace('.','_')}"
-    data_loader, class_mask,main_buffer , dataset_train = build_continual_dataloader(args)
+    wandb.init(project="precontinual", name=f"imagenet_dualprompt_{args.dataset}_{args.model}", config=vars(args),mode="disabled",tags=["cvpr","imagenet-dualprompt"])
+    args.name = f"imagenet_dualprompt_{args.dataset}_{args.model.replace('.','_')}"
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
 
+    transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            normalize,
+        ])
+    dataset = ImageNet(transform)
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=64, shuffle=False,
+        num_workers=4, pin_memory=True)
+    text_encodings = clip.tokenize(dataset.classes).to(device)
 
+    clip_model, _ = clip.load("ViT-B/16", device="cuda")
+
+    # turn off gradients for CLIP
+    for param in clip_model.parameters():
+        param.requires_grad = False
+    text_features = clip_model.encode_text(text_encodings).float()
+    logit_scale = clip_model.logit_scale.exp().float()
     print(f"Creating original model: {args.model}")
-
-    act_layer = torch.nn.GELU
-    if args.model == "vit_base_patch16_clip_224.openai":
-        act_layer = QuickGELU
-
-
     original_model = create_model(
         args.model,
         pretrained=args.pretrained,
@@ -76,9 +98,12 @@ def main(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
-        act_layer=act_layer,
+        act_layer=QuickGELU,
     )
-
+    original_model.to(device)
+    # Turn off gradients for original model
+    for param in original_model.parameters():
+        param.requires_grad = False
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
@@ -106,109 +131,74 @@ def main(args):
         e_prompt_layer_idx=args.e_prompt_layer_idx,
         use_prefix_tune_for_e_prompt=args.use_prefix_tune_for_e_prompt,
         same_key_value=args.same_key_value,
-        act_layer=act_layer,
+        act_layer=QuickGELU,
     )
-    original_model.to(device)
-    model.to(device)  
-    if args.freeze:
-        # all parameters are frozen for original vit model
-        for p in original_model.parameters():
-            p.requires_grad = False
-        
-        # freeze args.freeze[blocks, patch_embed, cls_token] parameters
-        for n, p in model.named_parameters():
-            if n.startswith(tuple(args.freeze)):
-                p.requires_grad = False
-        model.classnames = get_classnames(args)
-    text_encodings = clip.tokenize(model.classnames).to(device)
-    clip_model, _ = clip.load("ViT-B/16", device="cuda")
-    for param in clip_model.parameters():
+    model.to(device) 
+    model.classnames = dataset.classes
+    model.text_features = text_features
+    model.logit_scale = logit_scale
+    model.proj = clip_model.visual.proj.float()
+    checkpoint_path = f"/home/paulj/projects/dualprompt-pytorch/output/checkpoint_dualprompt_{args.dataset}_vit_base_patch16_clip_224_openai/task10_checkpoint.pth"
+    print('Loading checkpoint from:', checkpoint_path)
+    checkpoint = torch.load(checkpoint_path,map_location="cuda")
+    model.load_state_dict(checkpoint['model'])
+    model.eval()
+    # Turn off gradients for model
+    for param in model.parameters():
         param.requires_grad = False
-    if args.model == "vit_base_patch16_clip_224.openai":
-        original_model.proj = clip_model.visual.proj.float()
-        original_model.text_features = clip_model.encode_text(text_encodings).float()
-        original_model.logit_scale = clip_model.logit_scale.exp().float()
-        model.proj = clip_model.visual.proj.float()
-        model.proj.requires_grad = True
-        model.text_features = clip_model.encode_text(text_encodings).float()
-        model.text_features.requires_grad = False
-        model.logit_scale = clip_model.logit_scale.exp().float()
-        model.logit_scale.requires_grad = False
-    
-    print(args)
-    args.main_buffer = main_buffer
+    from tqdm import tqdm
+    correct = 0
+    total = 0
+    pbar = tqdm(enumerate(data_loader),total=len(data_loader),desc="eval")
 
-    if args.eval:
-        acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in pbar:
+            inputs, targets = inputs.to(device), targets.to(device)
+            cls_features = original_model(inputs)["pre_logits"]
+            output = model(inputs,cls_features=cls_features)
+            logits = output['logits']
+            preds = logits.argmax(dim=1)
+            total += targets.size(0)
+            correct += (preds == targets).sum().item()
+            pbar.set_description(f"eval accuracy: {correct/total * 100:.2f}")
 
-        for task_id in range(args.num_tasks):
-            checkpoint_path = os.path.join(args.output_dir, 'checkpoint/task{}_checkpoint.pth'.format(task_id+1))
-            if os.path.exists(checkpoint_path):
-                print('Loading checkpoint from:', checkpoint_path)
-                checkpoint = torch.load(checkpoint_path)
-                model.load_state_dict(checkpoint['model'])
-            else:
-                print('No checkpoint found at:', checkpoint_path)
-                return
-            _ = evaluate_till_now(model, original_model, data_loader, device, 
-                                            task_id, class_mask, acc_matrix, args,)
-        
-        return
+    final_accuracy = (correct / total) * 100
+    print("Final accuracy:",final_accuracy)
 
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
 
-    if args.unscale_lr:
-        global_batch_size = args.batch_size
-    else:
-        global_batch_size = args.batch_size * args.world_size
-    args.lr = args.lr * global_batch_size / 256.0
 
-    optimizer = create_optimizer(args, model_without_ddp)
-    if args.model == "vit_base_patch16_clip_224.openai":
-        optimizer.add_param_group({
-            "params": [model.proj],
-            "lr": args.lr * 1e-2,
-        })
 
-    if args.sched != 'constant':
-        lr_scheduler, _ = create_scheduler(args, optimizer)
-    elif args.sched == 'constant':
-        lr_scheduler = None
 
-    criterion = torch.nn.CrossEntropyLoss().to(device)
 
-    print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
 
-    train_and_evaluate(model, model_without_ddp, original_model,
-                    criterion, data_loader, optimizer, lr_scheduler,
-                    device, class_mask, args,dataset_train)
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Total training time: {total_time_str}")
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('DualPrompt training and evaluation configs')
-    
+    parser = argparse.ArgumentParser('dualprompt training and evaluation configs')
     config = parser.parse_known_args()[-1][0]
 
     subparser = parser.add_subparsers(dest='subparser_name')
 
     if config == 'cifar100_dualprompt':
         from configs.cifar100_dualprompt import get_args_parser
-        config_parser = subparser.add_parser('cifar100_dualprompt', help='Split-CIFAR100 DualPrompt configs')
+        config_parser = subparser.add_parser('cifar100_dualprompt', help='Split-CIFAR100 dualprompt configs')
         get_args_parser(config_parser)
         args = parser.parse_args()
         args.num_tasks = 10
         args.memory = 2000
         args.nb_classes = 100
+
     elif config == "cub_dualprompt":
         from configs.cub_dualprompt import get_args_parser
         config_parser = subparser.add_parser('cub_dualprompt', help='CUB-200-2011 dualprompt configs')
@@ -257,19 +247,19 @@ if __name__ == '__main__':
         args.num_tasks = 10
         args.memory = 1500
         args.nb_classes = 500
-    elif config == 'imr_dualprompt':
-        from configs.imr_dualprompt import get_args_parser
-        config_parser = subparser.add_parser('imr_dualprompt', help='Split-ImageNet-R DualPrompt configs')
+    elif config == 'five_datasets_dualprompt':
+        from configs.five_datasets_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('five_datasets_dualprompt', help='5-Datasets dualprompt configs')
     else:
         raise NotImplementedError
-        
+    
     # get_args_parser(config_parser)
 
     # args = parser.parse_args()
-    
+
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    
+
     main(args)
-    
+
     sys.exit(0)

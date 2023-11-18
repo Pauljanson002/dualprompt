@@ -865,14 +865,16 @@ class Birdsnap(torch.utils.data.Dataset):
         self.idx_dir = "/home/paulj/data/birdsnap/"
         with open(f'{self.idx_dir}/test_images.txt','r') as f:
             lines = f.readlines()
-            test_paths = [os.path.join(self.root,line.strip()) for line in lines if 'jpg' in line]
-        test_indices = [idx for idx, ( path,_) in enumerate(self.set.samples) if path in test_paths]
-        train_indices = [idx for idx in range(len(self.set)) if idx not in test_indices]
+            test_paths = [os.path.join("/home/paulj/data/birdsnap/download/images",line.strip()) for line in lines if 'jpg' in line]
+            test_indices = [idx for idx, ( path,_) in enumerate(self.set.samples) if path in test_paths]
+            train_indices = [idx for idx in range(len(self.set)) if idx not in test_indices]
+        self.targets = self.set.targets
         if split == "train":
             self.set = torch.utils.data.Subset(self.set,train_indices)
+            self.targets = [self.targets[idx] for idx in train_indices]
         else:
             self.set = torch.utils.data.Subset(self.set,test_indices)
-        self.targets = [self.set[i][1] for i in range(len(self.set))]
+            self.targets = [self.targets[idx] for idx in test_indices]
         self.transform = transform
         self.classes = [
     'Acadian Flycatcher',

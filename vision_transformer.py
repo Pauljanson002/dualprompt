@@ -611,9 +611,43 @@ class VisionTransformer(nn.Module):
         
         return res
 
+    def forward_lang(self, res, pre_logits: bool = False):
+        x = res['x']
+        if self.class_token and self.head_type == 'token':
+            x = x[:, 0]
+        elif self.head_type == 'gap' and self.global_pool == 'avg':
+            x = x.mean(dim=1)
+        elif self.head_type == 'prompt' and self.prompt_pool:
+            x = x[:, 1:(1 + self.total_prompt_len)] if self.class_token else x[:, 0:self.total_prompt_len]
+            x = x.mean(dim=1)
+        elif self.head_type == 'token+prompt' and self.prompt_pool and self.class_token:
+            x = x[:, 0:self.total_prompt_len + 1]
+            x = x.mean(dim=1)
+        else:
+            raise ValueError(f'Invalid classifier={self.classifier}')
+        
+        res['pre_logits'] = x
+
+        x = x @ self.proj
+        x = x / x.norm(dim=1, keepdim=True)
+        text_features = self.text_features / self.text_features.norm(dim=1, keepdim=True)
+        logits_per_image = self.logit_scale * x @ text_features.t()
+        logits_per_text = logits_per_image.t()
+        res['logits'] = logits_per_image
+        res["logits_per_text"] = logits_per_text
+        
+        # text_features_unselected = self.text_features/self.text_features.norm(dim=1, keepdim=True)
+        # logits_per_image_unselected = self.logit_scale * x @ text_features_unselected.t()
+        # res['logits_unselected'] = logits_per_image_unselected
+        
+        return res
+
     def forward(self, x, task_id=-1, cls_features=None, train=False):
         res = self.forward_features(x, task_id=task_id, cls_features=cls_features, train=train)
-        res = self.forward_head(res)
+        if self.proj is not None:
+            res = self.forward_lang(res)
+        else:
+            res = self.forward_head(res)
         return res
 
 
