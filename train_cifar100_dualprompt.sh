@@ -53,12 +53,12 @@ set -e
 # --data-path ~/data/ \
 # --output_dir ./output \
 
-# python main.py \
-# cifar100_dualprompt \
-# --model vit_base_patch16_clip_224.openai \
-# --batch-size 64 \
-# --data-path ~/data/ \
-# --output_dir ./output 
+python main.py \
+cifar100_dualprompt \
+--model vit_base_patch16_clip_224.openai \
+--batch-size 64 \
+--data-path ~/data/ \
+--output_dir ./output 
 
 # python main.py \
 # birdsnap_dualprompt \
@@ -105,9 +105,9 @@ set -e
 # --data-path ~/data/ \
 # --output_dir ./output \
 
-python main.py \
-birdsnap_dualprompt \
---model vit_base_patch16_clip_224.openai \
---batch-size 64 \
---data-path ~/data/ \
---output_dir ./output 
+# python main.py \
+# birdsnap_dualprompt \
+# --model vit_base_patch16_clip_224.openai \
+# --batch-size 64 \
+# --data-path ~/data/ \
+# --output_dir ./output 
